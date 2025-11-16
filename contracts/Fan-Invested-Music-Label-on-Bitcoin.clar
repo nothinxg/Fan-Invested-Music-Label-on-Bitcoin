@@ -11,6 +11,10 @@
 (define-constant err-no-revenue (err u107))
 (define-constant err-unauthorized (err u108))
 (define-constant err-invalid-status (err u109))
+(define-constant err-milestone-exists (err u110))
+(define-constant err-invalid-percentage (err u111))
+(define-constant err-milestone-not-found (err u112))
+(define-constant err-milestone-released (err u113))
 
 (define-data-var next-song-id uint u1)
 (define-data-var total-platform-revenue uint u0)
@@ -53,6 +57,21 @@
   {staker-count: uint}
 )
 
+(define-map milestones
+  {song-id: uint, milestone-id: uint}
+  {
+    description: (string-ascii 100),
+    percentage: uint,
+    released: bool,
+    released-at: (optional uint)
+  }
+)
+
+(define-map song-milestones
+  uint
+  {milestone-count: uint, total-released: uint}
+)
+
 (define-public (register-artist (name (string-ascii 50)))
   (let
     (
@@ -87,6 +106,7 @@
       funded-at: none
     })
     (map-set song-stakers song-id {staker-count: u0})
+    (map-set song-milestones song-id {milestone-count: u0, total-released: u0})
     (map-set artists caller (merge artist-data {song-count: (+ (get song-count artist-data) u1)}))
     (var-set next-song-id (+ song-id u1))
     (ok song-id)
@@ -241,4 +261,63 @@
     total-revenue: (var-get total-platform-revenue),
     total-songs: (- (var-get next-song-id) u1)
   })
+)
+
+(define-public (create-milestone (song-id uint) (description (string-ascii 100)) (percentage uint))
+  (let
+    (
+      (caller tx-sender)
+      (song-data (unwrap! (map-get? songs song-id) err-not-found))
+      (milestones-data (unwrap! (map-get? song-milestones song-id) err-not-found))
+      (milestone-id (get milestone-count milestones-data))
+    )
+    (asserts! (is-eq caller (get artist song-data)) err-unauthorized)
+    (asserts! (is-eq (get status song-data) "active") err-invalid-status)
+    (asserts! (and (> percentage u0) (<= percentage u100)) err-invalid-percentage)
+    (asserts! (is-none (map-get? milestones {song-id: song-id, milestone-id: milestone-id})) err-milestone-exists)
+    (map-set milestones {song-id: song-id, milestone-id: milestone-id} {
+      description: description,
+      percentage: percentage,
+      released: false,
+      released-at: none
+    })
+    (map-set song-milestones song-id {
+      milestone-count: (+ milestone-id u1),
+      total-released: (get total-released milestones-data)
+    })
+    (ok milestone-id)
+  )
+)
+
+(define-public (release-milestone-funds (song-id uint) (milestone-id uint))
+  (let
+    (
+      (caller tx-sender)
+      (song-data (unwrap! (map-get? songs song-id) err-not-found))
+      (milestone-data (unwrap! (map-get? milestones {song-id: song-id, milestone-id: milestone-id}) err-milestone-not-found))
+      (milestones-data (unwrap! (map-get? song-milestones song-id) err-not-found))
+      (total-funds (get total-staked song-data))
+      (release-amount (/ (* total-funds (get percentage milestone-data)) u100))
+    )
+    (asserts! (is-eq caller (get artist song-data)) err-unauthorized)
+    (asserts! (is-eq (get status song-data) "funded") err-invalid-status)
+    (asserts! (not (get released milestone-data)) err-milestone-released)
+    (try! (as-contract (stx-transfer? release-amount tx-sender caller)))
+    (map-set milestones {song-id: song-id, milestone-id: milestone-id} (merge milestone-data {
+      released: true,
+      released-at: (some stacks-block-height)
+    }))
+    (map-set song-milestones song-id (merge milestones-data {
+      total-released: (+ (get total-released milestones-data) release-amount)
+    }))
+    (ok release-amount)
+  )
+)
+
+(define-read-only (get-milestone (song-id uint) (milestone-id uint))
+  (ok (map-get? milestones {song-id: song-id, milestone-id: milestone-id}))
+)
+
+(define-read-only (get-song-milestones-info (song-id uint))
+  (ok (map-get? song-milestones song-id))
 )
